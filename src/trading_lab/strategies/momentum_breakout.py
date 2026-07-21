@@ -23,6 +23,11 @@ def entry_signal(close: float, prior_high_value: float, sma_value: float) -> boo
     return close > prior_high_value and close > sma_value
 
 
+def sma_exit_signal(close: float, sma_value: float) -> bool:
+    """Return true only when the close is strictly below the exit SMA."""
+    return close < sma_value
+
+
 class MomentumBreakoutStrategy(LongOnlyStrategy):
     """Buy close-confirmed breakouts; orders fill according to runner execution mode."""
 
@@ -31,18 +36,28 @@ class MomentumBreakoutStrategy(LongOnlyStrategy):
     stop_loss_pct = 0.02
     take_profit_pct: float | None = 0.04
     max_holding_bars: int | None = None
+    exit_sma_period: int | None = None
     execution_mode = "next_open"
 
     def init(self) -> None:
         self.prior_high = self.I(previous_high, self.data.High, self.breakout_lookback)
         self.sma_line = self.I(sma, self.data.Close, self.sma_period)
+        if self.exit_sma_period is not None:
+            self.exit_sma_line = self.I(sma, self.data.Close, self.exit_sma_period)
 
     def next(self) -> None:
         if self.position:
+            # Strategy exits are evaluated at the completed bar close.  Time exits
+            # deliberately win ties with SMA exits; native SL/TP remain intrabar.
             if self.max_holding_bars is not None:
                 trade = self.trades[-1]
                 if len(self.data) - trade.entry_bar >= self.max_holding_bars:
                     self.position.close()
+                    return
+            if self.exit_sma_period is not None and sma_exit_signal(
+                float(self.data.Close[-1]), float(self.exit_sma_line[-1])
+            ):
+                self.position.close()
             return
         close = float(self.data.Close[-1])
         if entry_signal(close, float(self.prior_high[-1]), float(self.sma_line[-1])):

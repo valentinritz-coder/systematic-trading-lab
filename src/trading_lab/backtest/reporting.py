@@ -28,6 +28,7 @@ def enrich_trades(
     data: pd.DataFrame | None = None,
     execution_mode: str = "next_open",
     max_holding_bars: int | None = None,
+    exit_sma_period: int | None = None,
 ) -> pd.DataFrame:
     """Add robust signal metadata and gap-aware risk fields to completed trades."""
     result = trades.copy()
@@ -93,6 +94,10 @@ def enrich_trades(
     result["holding_bars"] = result.get("ExitBar", pd.Series(dtype=float)) - result.get(
         "EntryBar", pd.Series(dtype=float)
     )
+    result["duration_bars"] = result["holding_bars"]
+    result["duration_days"] = (
+        pd.to_datetime(result["exit_date"]) - pd.to_datetime(result["entry_date"])
+    ).dt.total_seconds() / 86400
     result["exit_reason"] = "unknown"
     tolerance = 1e-8
     result.loc[result["exit_price"] <= result["planned_stop_price"] + tolerance, "exit_reason"] = (
@@ -109,6 +114,16 @@ def enrich_trades(
         & (result["holding_bars"] >= max_holding_bars),
         "exit_reason",
     ] = "max_holding"
+    if data is not None and exit_sma_period is not None:
+        exit_sma = data["Close"].rolling(exit_sma_period).mean()
+        for index, trade in result.loc[result["exit_reason"].eq("unknown")].iterrows():
+            exit_bar = int(trade["ExitBar"])
+            signal_bar = exit_bar if execution_mode == "signal_close" else exit_bar - 1
+            if (
+                0 <= signal_bar < len(data)
+                and data["Close"].iloc[signal_bar] < exit_sma.iloc[signal_bar]
+            ):
+                result.loc[index, "exit_reason"] = "sma_exit"
     # finalize_trades closes any still-open position on the last bar.
     if data is not None:
         result.loc[
@@ -116,20 +131,66 @@ def enrich_trades(
             & result.get("ExitBar", pd.Series(dtype=float)).eq(len(data) - 1),
             "exit_reason",
         ] = "end_of_data"
+    result["mfe_pct"] = np.nan
+    result["mae_pct"] = np.nan
+    result["mfe_amount"] = np.nan
+    result["mae_amount"] = np.nan
+    if data is not None:
+        for index, trade in result.iterrows():
+            entry_bar, exit_bar = int(trade["EntryBar"]), int(trade["ExitBar"])
+            entry_price, exit_price = float(trade["EntryPrice"]), float(trade["ExitPrice"])
+            highs = list(data["High"].iloc[entry_bar : exit_bar + 1])
+            lows = list(data["Low"].iloc[entry_bar : exit_bar + 1])
+            reason = str(trade["exit_reason"])
+            if reason == "stop_loss":
+                # The high on an intrabar stop's exit bar may occur after the stop.
+                # Exclude that unknown side instead of substituting a prior-bar value.
+                highs = highs[:-1]
+                highs.append(entry_price)
+                lows[-1] = exit_price
+            elif reason == "take_profit":
+                highs[-1] = exit_price
+                # The low on an intrabar target's exit bar may occur after the target.
+                lows = lows[:-1]
+                lows.append(entry_price)
+            elif execution_mode == "next_open" and reason in {"max_holding", "sma_exit"}:
+                highs[-1] = exit_price
+                lows[-1] = exit_price
+            mfe = (max(max(highs), entry_price) / entry_price - 1) * 100
+            mae = (min(min(lows), entry_price) / entry_price - 1) * 100
+            size = abs(float(trade["Size"]))
+            result.loc[index, ["mfe_pct", "mae_pct"]] = [mfe, mae]
+            result.loc[index, ["mfe_amount", "mae_amount"]] = [
+                size * entry_price * mfe / 100,
+                size * entry_price * mae / 100,
+            ]
     return result
 
 
 def build_metrics(
-    stats: pd.Series, initial_cash: float, max_holding_bars: int | None = None
+    stats: pd.Series,
+    initial_cash: float,
+    max_holding_bars: int | None = None,
+    data: pd.DataFrame | None = None,
+    execution_mode: str = "next_open",
+    exit_sma_period: int | None = None,
 ) -> dict[str, MetricValue]:
     """Normalize engine metrics and compute gap-aware statistics."""
-    trades = enrich_trades(stats["_trades"], max_holding_bars=max_holding_bars)
+    trades = enrich_trades(
+        stats["_trades"], data, execution_mode, max_holding_bars, exit_sma_period
+    )
     pnl = trades["PnL"] if not trades.empty else pd.Series(dtype=float)
     wins, losses = pnl[pnl > 0], pnl[pnl < 0]
     gross_profit, gross_loss = float(wins.sum()), abs(float(losses.sum()))
     valid_risk = trades.loc[
         trades["gap_status"].eq("within_brackets"), "actual_risk_to_planned_stop_pct"
     ]
+    total_pnl = float(pnl.sum())
+    ranked_pnl = pnl.sort_values(ascending=False)
+
+    def contribution(count: int) -> float | None:
+        return None if total_pnl == 0 else float(ranked_pnl.head(count).sum() / total_pnl * 100)
+
     return {
         "initial_capital": initial_cash,
         "final_capital": float(stats["Equity Final [$]"]),
@@ -154,6 +215,19 @@ def build_metrics(
         "opened_above_target_count": int(trades["gap_status"].eq("opened_above_target").sum()),
         "same_bar_exit_count": int(trades["entry_and_exit_same_bar"].sum()),
         "average_valid_actual_risk_pct": _number(valid_risk.mean()),
+        "average_trade_duration_bars": _number(trades["duration_bars"].mean()),
+        "max_trade_duration_bars": _number(trades["duration_bars"].max()),
+        "average_trade_duration_days": _number(trades["duration_days"].mean()),
+        "max_trade_duration_days": _number(trades["duration_days"].max()),
+        "best_trade_contribution_pct": contribution(1),
+        "top_3_trades_contribution_pct": contribution(3),
+        "top_5_trades_contribution_pct": contribution(5),
+        "average_mfe_pct": _number(trades["mfe_pct"].mean()),
+        "average_mae_pct": _number(trades["mae_pct"].mean()),
+        "median_mfe_pct": _number(trades["mfe_pct"].median()),
+        "median_mae_pct": _number(trades["mae_pct"].median()),
+        "average_mfe_amount": _number(trades["mfe_amount"].mean()),
+        "average_mae_amount": _number(trades["mae_amount"].mean()),
     }
 
 
@@ -173,9 +247,12 @@ def write_reports(
     data: pd.DataFrame | None = None,
     execution_mode: str = "next_open",
     max_holding_bars: int | None = None,
+    exit_sma_period: int | None = None,
 ) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    metrics = build_metrics(stats, initial_cash, max_holding_bars)
+    metrics = build_metrics(
+        stats, initial_cash, max_holding_bars, data, execution_mode, exit_sma_period
+    )
     metrics["generated_at"] = datetime.now(UTC).isoformat()
     metrics_path, trades_path, equity_path = (
         output_dir / "metrics.json",
@@ -183,7 +260,9 @@ def write_reports(
         output_dir / "equity_curve.csv",
     )
     metrics_path.write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
-    trades = enrich_trades(stats["_trades"], data, execution_mode, max_holding_bars)
+    trades = enrich_trades(
+        stats["_trades"], data, execution_mode, max_holding_bars, exit_sma_period
+    )
     trades.to_csv(trades_path, index=False)
     equity = stats["_equity_curve"].copy()
     equity.to_csv(equity_path, index=True, index_label="timestamp")
@@ -241,6 +320,23 @@ def write_reports(
             f"Longest loss streak: {longest_loss_streak(trades)}",
             f"Average holding bars: {average_holding}",
             "",
+            "## Trade duration",
+            f"Average: {metrics['average_trade_duration_bars']} bars / "
+            f"{metrics['average_trade_duration_days']} days",
+            f"Maximum: {metrics['max_trade_duration_bars']} bars / "
+            f"{metrics['max_trade_duration_days']} days",
+            "",
+            "## Return concentration",
+            f"Best trade contribution: {metrics['best_trade_contribution_pct']}%",
+            f"Top 3 contribution: {metrics['top_3_trades_contribution_pct']}%",
+            f"Top 5 contribution: {metrics['top_5_trades_contribution_pct']}%",
+            "",
+            "## Excursions",
+            f"Average MFE: {metrics['average_mfe_pct']}% | "
+            f"Median MFE: {metrics['median_mfe_pct']}%",
+            f"Average MAE: {metrics['average_mae_pct']}% | "
+            f"Median MAE: {metrics['median_mae_pct']}%",
+            "",
             f"Max drawdown: {metrics['max_drawdown_pct']}%",
             f"Average entry gap: {metrics['average_entry_gap_pct']}%",
             f"Estimated commissions: {metrics['estimated_commissions']}",
@@ -260,7 +356,8 @@ def write_reports(
             "",
             "Buy-and-hold uses the same OHLCV data but is not risk-equivalent: "
             "this strategy can remain in cash.",
-            "Exit reasons identify stop-loss, take-profit, maximum-holding, and end-of-data exits.",
+            "Exit reasons identify stop-loss, take-profit, maximum-holding, SMA, "
+            "and end-of-data exits.",
         ]
     )
     summary_path = output_dir / "summary.md"

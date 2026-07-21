@@ -21,16 +21,30 @@ def test_yaml_configuration_loads() -> None:
     assert config.data.path is not None and config.data.path.is_file()
 
 
-@pytest.mark.parametrize("field, value", [("take_profit_pct", 0), ("max_holding_bars", 0)])
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("take_profit_pct", 0),
+        ("max_holding_bars", 0),
+        ("exit_sma_period", 0),
+        ("exit_sma_period", -1),
+    ],
+)
 def test_optional_exit_configuration_rejects_non_positive_values(field: str, value: int) -> None:
     with pytest.raises(ValueError):
         StrategyConfig(**{field: value})
 
 
 def test_optional_exit_configuration_accepts_null_values() -> None:
-    strategy = StrategyConfig(take_profit_pct=None, max_holding_bars=None)
+    strategy = StrategyConfig(take_profit_pct=None, max_holding_bars=None, exit_sma_period=None)
     assert strategy.take_profit_pct is None
     assert strategy.max_holding_bars is None
+    assert strategy.exit_sma_period is None
+
+
+def test_exit_sma_configuration_accepts_positive_value_and_legacy_config() -> None:
+    assert StrategyConfig(exit_sma_period=20).exit_sma_period == 20
+    assert load_config(ROOT / "configs/momentum-demo.yml").strategy.exit_sma_period is None
 
 
 def test_deterministic_backtest_generates_reports(tmp_path: Path) -> None:

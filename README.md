@@ -34,9 +34,24 @@ The stop-loss is required. The other exit mechanisms can be disabled independent
 strategy:
   take_profit_pct: null    # disables the take-profit order
   max_holding_bars: null   # disables the time-based exit
+  exit_sma_period: null    # disables the close-based SMA exit
 ```
 
-When a numeric value is supplied, `take_profit_pct` and `max_holding_bars` must both be greater than zero. Positions that remain open at the end of the input data are closed with the `end_of_data` exit reason.
+When a numeric value is supplied, `take_profit_pct`, `max_holding_bars`, and `exit_sma_period` must all be strictly greater than zero. Positions that remain open at the end of the input data are closed with the `end_of_data` exit reason.
+
+`exit_sma_period` is optional and, when set to a positive integer, closes a long position when `Close < SMA(exit_sma_period)`.  The SMA exit is calculated from the completed current candle and therefore never reads future data.  In `next_open` mode its order fills at the following open. Native intrabar stop-loss and take-profit orders take priority; among close-evaluated strategy exits, `max_holding_bars` takes priority over `sma_exit`.
+
+```yaml
+strategy:
+  breakout_lookback: 20
+  sma_period: 50
+  stop_loss_pct: 0.02
+  take_profit_pct: null
+  max_holding_bars: null
+  exit_sma_period: 20
+```
+
+Reports include `duration_bars = exit_bar_index - entry_bar_index` and calendar duration `exit_timestamp - entry_timestamp`, including weekends. Return-concentration percentages rank net account-currency PnL and divide the best one, three, or five trades by total net PnL; they are `null` when total PnL is zero and can exceed 100% (or be less intuitive for negative totals). Per-trade MFE/MAE use long-position high/low excursions relative to entry price and their corresponding position-value amounts. Full OHLC is used only through the exit; for intrabar stop/target exits the unknown side of the exit candle is conservatively excluded and the known fill price is used, rather than claiming an unknowable intrabar sequence.
 
 `execution.mode: next_open` (default) takes the signal after a candle closes and submits a parent order that `backtesting.py` fills at the following open. The parent is created immediately with native contingent stop-loss and take-profit brackets, so the engine can evaluate them during the entry candle. Stop and target are planned from the signal close, **not** claimed to be exact percentages of the eventual fill. The trade export exposes the signal/fill prices, entry gap, planned and actual risk, explicit gap status, and whether entry and exit occurred in one bar. `signal_close` enables `trade_on_close=True`; it is experimental and potentially optimistic because a close-price fill may not be tradable in practice.
 

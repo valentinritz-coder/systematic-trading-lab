@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from backtesting import Backtest
 
-from trading_lab.backtest.reporting import enrich_trades
+from trading_lab.backtest.reporting import build_metrics, enrich_trades
 from trading_lab.backtest.runner import run_backtest
 from trading_lab.config import load_config
 from trading_lab.strategies.base import LongOnlyStrategy
@@ -34,6 +34,7 @@ def run_frame(
     mode: str = "next_open",
     holding: int | None = None,
     take_profit: float | None = 0.04,
+    exit_sma: int | None = None,
 ) -> pd.DataFrame:
     stats = Backtest(
         frame,
@@ -48,9 +49,10 @@ def run_frame(
         stop_loss_pct=0.02,
         take_profit_pct=take_profit,
         max_holding_bars=holding,
+        exit_sma_period=exit_sma,
         execution_mode=mode,
     )
-    trades = enrich_trades(stats["_trades"], frame, mode, holding)
+    trades = enrich_trades(stats["_trades"], frame, mode, holding, exit_sma)
     assert len(trades) == 1
     return trades
 
@@ -119,6 +121,20 @@ def test_disabled_max_holding_keeps_position_open_until_end_of_data() -> None:
     assert trade.loc[0, "exit_reason"] == "end_of_data"
 
 
+def test_absent_and_null_exit_sma_preserve_legacy_results() -> None:
+    frame = no_stop_or_target_frame()
+    absent = run_frame(frame, take_profit=None)
+    disabled = run_frame(frame, take_profit=None, exit_sma=None)
+    pd.testing.assert_frame_equal(absent, disabled)
+
+
+def test_sma_exit_does_not_close_before_a_strict_crossing() -> None:
+    frame = no_stop_or_target_frame()
+    frame.loc[frame.index[6:], ["Open", "High", "Low", "Close"]] = [12, 12.2, 11.8, 12]
+    trade = run_frame(frame, take_profit=None, exit_sma=2)
+    assert trade.loc[0, "exit_reason"] == "end_of_data"
+
+
 def test_disabling_target_and_max_holding_leaves_only_stop_and_end_of_data_exits() -> None:
     trade = run_frame(no_stop_or_target_frame(), take_profit=None, holding=None)
     assert trade.loc[0, "exit_reason"] == "end_of_data"
@@ -154,6 +170,59 @@ def test_holding_period_uses_actual_entry_bar_in_both_modes() -> None:
     for mode in ("next_open", "signal_close"):
         trade = run_frame(breakout_frame(11, 11.2, 10.9), mode=mode, holding=1)
         assert trade.loc[0, "ExitBar"] >= trade.loc[0, "EntryBar"]
+
+
+def test_sma_exit_fills_at_next_open_and_is_classified() -> None:
+    frame = no_stop_or_target_frame()
+    frame.loc[frame.index[7], ["Open", "High", "Low", "Close"]] = [9, 9.5, 8.5, 9]
+    frame.loc[frame.index[8], ["Open", "High", "Low", "Close"]] = [8, 8.5, 7.5, 8]
+    stats = Backtest(
+        frame, MomentumBreakoutStrategy, cash=1000, exclusive_orders=True, finalize_trades=True
+    ).run(
+        breakout_lookback=2,
+        sma_period=3,
+        stop_loss_pct=0.5,
+        take_profit_pct=None,
+        max_holding_bars=None,
+        exit_sma_period=2,
+        execution_mode="next_open",
+    )
+    trade = enrich_trades(stats["_trades"], frame, "next_open", None, 2).iloc[0]
+    assert trade["exit_reason"] == "sma_exit"
+    assert trade["ExitPrice"] == frame["Open"].iloc[int(trade["ExitBar"])]
+    assert trade["duration_bars"] == trade["ExitBar"] - trade["EntryBar"]
+    assert trade["mfe_pct"] >= 0 and trade["mae_pct"] <= 0
+
+
+def test_metrics_duration_concentration_and_zero_total_pnl() -> None:
+    raw = pd.DataFrame(
+        {
+            "EntryPrice": [10, 10],
+            "ExitPrice": [11, 9],
+            "EntryBar": [0, 1],
+            "ExitBar": [1, 4],
+            "EntryTime": pd.to_datetime(["2024-01-05", "2024-01-06"]),
+            "ExitTime": pd.to_datetime(["2024-01-08", "2024-01-10"]),
+            "PnL": [10.0, -10.0],
+            "Size": [1, 1],
+            "Tag": [None, None],
+        }
+    )
+    stats = pd.Series(
+        {
+            "_trades": raw,
+            "Equity Final [$]": 1000,
+            "Return [%]": 0,
+            "Buy & Hold Return [%]": 0,
+            "Win Rate [%]": 50,
+            "Max. Drawdown [%]": 0,
+            "Max. Drawdown Duration": pd.Timedelta(0),
+        }
+    )
+    metrics = build_metrics(stats, 1000)
+    assert metrics["average_trade_duration_bars"] == 2
+    assert metrics["average_trade_duration_days"] == 3.5
+    assert metrics["best_trade_contribution_pct"] is None
 
 
 def test_tags_are_resilient_to_missing_invalid_and_incomplete_metadata() -> None:
