@@ -128,7 +128,14 @@ def run_backtest(
     stats = engine.run(**config.strategy.model_dump(), execution_mode=config.execution.mode)
     if (stats["_trades"]["Size"] < 0).any():
         raise RuntimeError("Backtest produced a short transaction; refusing to write reports")
-    paths = write_reports(stats, config.initial_cash, output_dir, data, config.execution.mode)
+    paths = write_reports(
+        stats,
+        config.initial_cash,
+        output_dir,
+        data,
+        config.execution.mode,
+        config.strategy.max_holding_bars,
+    )
     paths["snapshot"] = output_dir / "input_ohlcv.csv"
     paths["manifest"] = write_manifest(output_dir, config, data, run_id, data_snapshot)
     html_path = output_dir / "report.html"

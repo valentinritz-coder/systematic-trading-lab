@@ -9,7 +9,8 @@ import numpy as np
 import pandas as pd
 
 MetricValue = float | int | str | None
-_TAG_FIELDS = ("signal_price", "planned_stop_price", "planned_target_price")
+_REQUIRED_TAG_FIELDS = ("signal_price", "planned_stop_price")
+_OPTIONAL_TAG_FIELDS = ("planned_target_price",)
 
 
 def _number(value: Any) -> float | int | None:
@@ -23,20 +24,26 @@ def _number(value: Any) -> float | int | None:
 
 
 def enrich_trades(
-    trades: pd.DataFrame, data: pd.DataFrame | None = None, execution_mode: str = "next_open"
+    trades: pd.DataFrame,
+    data: pd.DataFrame | None = None,
+    execution_mode: str = "next_open",
+    max_holding_bars: int | None = None,
 ) -> pd.DataFrame:
     """Add robust signal metadata and gap-aware risk fields to completed trades."""
     result = trades.copy()
-    for column in _TAG_FIELDS:
+    for column in (*_REQUIRED_TAG_FIELDS, *_OPTIONAL_TAG_FIELDS):
         result[column] = np.nan
     result["trade_metadata_valid"] = False
     for index, raw_tag in result.get("Tag", pd.Series(dtype=object)).items():
         try:
             tag = json.loads(raw_tag)
-            if not isinstance(tag, dict) or not all(key in tag for key in _TAG_FIELDS):
+            if not isinstance(tag, dict) or not all(key in tag for key in _REQUIRED_TAG_FIELDS):
                 continue
-            for column in _TAG_FIELDS:
+            for column in _REQUIRED_TAG_FIELDS:
                 result.loc[index, column] = float(tag[column])
+            target = tag.get("planned_target_price")
+            if target is not None:
+                result.loc[index, "planned_target_price"] = float(target)
             result.loc[index, "trade_metadata_valid"] = True
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
@@ -54,8 +61,10 @@ def enrich_trades(
         & (result["actual_entry_price"] <= result["planned_stop_price"]),
         "gap_status",
     ] = "opened_below_stop"
+    has_target = result["planned_target_price"].notna()
     result.loc[
         result["trade_metadata_valid"]
+        & has_target
         & (result["actual_entry_price"] >= result["planned_target_price"]),
         "gap_status",
     ] = "opened_above_target"
@@ -86,22 +95,35 @@ def enrich_trades(
     )
     result["exit_reason"] = "unknown"
     tolerance = 1e-8
+    result.loc[result["exit_price"] <= result["planned_stop_price"] + tolerance, "exit_reason"] = (
+        "stop_loss"
+    )
     result.loc[
-        (result["exit_price"] - result["planned_stop_price"]).abs() < tolerance, "exit_reason"
-    ] = "stop_loss"
-    result.loc[
-        (result["exit_price"] - result["planned_target_price"]).abs() < tolerance, "exit_reason"
+        has_target & (result["exit_price"] >= result["planned_target_price"] - tolerance),
+        "exit_reason",
     ] = "take_profit"
-    # The engine does not expose a reason. This only identifies the deterministic holding exit.
+    # A duration close is submitted once the configured holding limit is reached.
     result.loc[
-        (result["exit_reason"] == "unknown") & (result["holding_bars"] >= 0), "exit_reason"
-    ] = "unknown"
+        (result["exit_reason"] == "unknown")
+        & (max_holding_bars is not None)
+        & (result["holding_bars"] >= max_holding_bars),
+        "exit_reason",
+    ] = "max_holding"
+    # finalize_trades closes any still-open position on the last bar.
+    if data is not None:
+        result.loc[
+            (result["exit_reason"] == "unknown")
+            & result.get("ExitBar", pd.Series(dtype=float)).eq(len(data) - 1),
+            "exit_reason",
+        ] = "end_of_data"
     return result
 
 
-def build_metrics(stats: pd.Series, initial_cash: float) -> dict[str, MetricValue]:
+def build_metrics(
+    stats: pd.Series, initial_cash: float, max_holding_bars: int | None = None
+) -> dict[str, MetricValue]:
     """Normalize engine metrics and compute gap-aware statistics."""
-    trades = enrich_trades(stats["_trades"])
+    trades = enrich_trades(stats["_trades"], max_holding_bars=max_holding_bars)
     pnl = trades["PnL"] if not trades.empty else pd.Series(dtype=float)
     wins, losses = pnl[pnl > 0], pnl[pnl < 0]
     gross_profit, gross_loss = float(wins.sum()), abs(float(losses.sum()))
@@ -150,9 +172,10 @@ def write_reports(
     output_dir: Path,
     data: pd.DataFrame | None = None,
     execution_mode: str = "next_open",
+    max_holding_bars: int | None = None,
 ) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    metrics = build_metrics(stats, initial_cash)
+    metrics = build_metrics(stats, initial_cash, max_holding_bars)
     metrics["generated_at"] = datetime.now(UTC).isoformat()
     metrics_path, trades_path, equity_path = (
         output_dir / "metrics.json",
@@ -160,7 +183,7 @@ def write_reports(
         output_dir / "equity_curve.csv",
     )
     metrics_path.write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
-    trades = enrich_trades(stats["_trades"], data, execution_mode)
+    trades = enrich_trades(stats["_trades"], data, execution_mode, max_holding_bars)
     trades.to_csv(trades_path, index=False)
     equity = stats["_equity_curve"].copy()
     equity.to_csv(equity_path, index=True, index_label="timestamp")
@@ -237,8 +260,7 @@ def write_reports(
             "",
             "Buy-and-hold uses the same OHLCV data but is not risk-equivalent: "
             "this strategy can remain in cash.",
-            "Exit reasons are inferred only when a price exactly matches a planned bracket; "
-            "otherwise they remain `unknown`.",
+            "Exit reasons identify stop-loss, take-profit, maximum-holding, and end-of-data exits.",
         ]
     )
     summary_path = output_dir / "summary.md"
