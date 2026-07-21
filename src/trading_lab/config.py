@@ -33,7 +33,7 @@ class StrategyConfig(BaseModel):
     breakout_lookback: int = Field(default=20, ge=2)
     sma_period: int = Field(default=50, ge=2)
     stop_loss_pct: float = Field(default=0.02, gt=0, lt=1)
-    take_profit_pct: float = Field(default=0.04, gt=0, lt=1)
+    take_profit_pct: float | None = Field(default=0.04, gt=0, lt=1)
     max_holding_bars: int | None = Field(default=None, ge=1)
 
 

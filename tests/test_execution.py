@@ -29,7 +29,11 @@ def breakout_frame(entry_open: float, entry_high: float, entry_low: float) -> pd
 
 
 def run_frame(
-    frame: pd.DataFrame, *, mode: str = "next_open", holding: int | None = None
+    frame: pd.DataFrame,
+    *,
+    mode: str = "next_open",
+    holding: int | None = None,
+    take_profit: float | None = 0.04,
 ) -> pd.DataFrame:
     stats = Backtest(
         frame,
@@ -42,11 +46,11 @@ def run_frame(
         breakout_lookback=2,
         sma_period=3,
         stop_loss_pct=0.02,
-        take_profit_pct=0.04,
+        take_profit_pct=take_profit,
         max_holding_bars=holding,
         execution_mode=mode,
     )
-    trades = enrich_trades(stats["_trades"])
+    trades = enrich_trades(stats["_trades"], frame, mode, holding)
     assert len(trades) == 1
     return trades
 
@@ -77,6 +81,48 @@ def test_target_is_hit_during_entry_bar() -> None:
     trade = run_frame(breakout_frame(11, 11.6, 10.9))
     assert trade.loc[0, "ExitPrice"] == pytest.approx(11.44)
     assert trade.loc[0, "EntryBar"] == trade.loc[0, "ExitBar"]
+    assert trade.loc[0, "exit_reason"] == "take_profit"
+
+
+def no_stop_or_target_frame() -> pd.DataFrame:
+    frame = breakout_frame(11, 11.6, 10.9)
+    frame.loc[frame.index[7:], ["High", "Low"]] = [11.2, 10.9]
+    frame.loc[frame.index[7:], "Close"] = 11
+    frame.loc[frame.index[7:], "Open"] = 11
+    frame.loc[frame.index[7:], "Volume"] = 100
+    frame = pd.concat(
+        [
+            frame,
+            frame.iloc[[-1]].rename(
+                index={frame.index[-1]: frame.index[-1] + pd.Timedelta(days=1)}
+            ),
+        ]
+    )
+    return frame
+
+
+def test_disabled_take_profit_never_creates_a_target_exit() -> None:
+    trade = run_frame(no_stop_or_target_frame(), take_profit=None)
+    assert pd.isna(trade.loc[0, "planned_target_price"])
+    assert trade.loc[0, "exit_reason"] == "end_of_data"
+
+
+def test_enabled_max_holding_exits_after_configured_duration() -> None:
+    trade = run_frame(no_stop_or_target_frame(), take_profit=None, holding=1)
+    assert trade.loc[0, "holding_bars"] == 1
+    assert trade.loc[0, "exit_reason"] == "max_holding"
+
+
+def test_disabled_max_holding_keeps_position_open_until_end_of_data() -> None:
+    trade = run_frame(no_stop_or_target_frame(), take_profit=None, holding=None)
+    assert trade.loc[0, "holding_bars"] > 1
+    assert trade.loc[0, "exit_reason"] == "end_of_data"
+
+
+def test_disabling_target_and_max_holding_leaves_only_stop_and_end_of_data_exits() -> None:
+    trade = run_frame(no_stop_or_target_frame(), take_profit=None, holding=None)
+    assert trade.loc[0, "exit_reason"] == "end_of_data"
+    assert "unknown" not in trade["exit_reason"].to_numpy()
 
 
 def test_gap_below_stop_is_flagged_without_negative_risk() -> None:
@@ -85,6 +131,7 @@ def test_gap_below_stop_is_flagged_without_negative_risk() -> None:
     assert trade.loc[0, "ExitPrice"] == 10
     assert trade.loc[0, "gap_status"] == "opened_below_stop"
     assert pd.isna(trade.loc[0, "actual_risk_to_planned_stop_pct"])
+    assert trade.loc[0, "exit_reason"] == "stop_loss"
 
 
 def test_gap_above_target_is_flagged_at_native_engine_prices() -> None:
@@ -93,6 +140,7 @@ def test_gap_above_target_is_flagged_at_native_engine_prices() -> None:
     assert trade.loc[0, "ExitPrice"] == 12
     assert trade.loc[0, "gap_status"] == "opened_above_target"
     assert pd.isna(trade.loc[0, "actual_risk_to_planned_stop_pct"])
+    assert trade.loc[0, "exit_reason"] == "take_profit"
 
 
 def test_signal_close_reports_close_entry_and_brackets() -> None:

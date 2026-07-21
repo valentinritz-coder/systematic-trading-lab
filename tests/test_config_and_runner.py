@@ -8,7 +8,7 @@ import pytest
 
 from trading_lab.backtest.reporting import enrich_trades
 from trading_lab.backtest.runner import run_backtest
-from trading_lab.config import load_config
+from trading_lab.config import StrategyConfig, load_config
 from trading_lab.data.base import DataValidationError
 from trading_lab.data.yahoo_provider import YahooFinanceDataProvider
 
@@ -21,12 +21,25 @@ def test_yaml_configuration_loads() -> None:
     assert config.data.path is not None and config.data.path.is_file()
 
 
+@pytest.mark.parametrize("field, value", [("take_profit_pct", 0), ("max_holding_bars", 0)])
+def test_optional_exit_configuration_rejects_non_positive_values(field: str, value: int) -> None:
+    with pytest.raises(ValueError):
+        StrategyConfig(**{field: value})
+
+
+def test_optional_exit_configuration_accepts_null_values() -> None:
+    strategy = StrategyConfig(take_profit_pct=None, max_holding_bars=None)
+    assert strategy.take_profit_pct is None
+    assert strategy.max_holding_bars is None
+
+
 def test_deterministic_backtest_generates_reports(tmp_path: Path) -> None:
     config = load_config(ROOT / "configs/momentum-demo.yml")
     config.output_dir = tmp_path
     stats, paths = run_backtest(config)
     assert stats["Equity Final [$]"] > 0
     assert len(stats["_trades"]) == 4
+    assert stats["Equity Final [$]"] == pytest.approx(1046.1737264)
     assert {"metrics", "trades", "equity"}.issubset(paths)
     assert all(path.is_file() for path in paths.values())
 

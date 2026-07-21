@@ -26,6 +26,18 @@ All relative paths, including `data.path` and `output_dir`, are resolved relativ
 
 `MomentumBreakoutStrategy` buys only when the close exceeds the **previous** 20-bar high and is above its 50-bar SMA. It applies a 2% planned stop-loss, a 4% planned take-profit, and optional maximum holding duration. The current bar is excluded from the breakout high, preventing that form of look-ahead bias.
 
+### Exit configuration
+
+The stop-loss is required. The other exit mechanisms can be disabled independently for strategy research:
+
+```yaml
+strategy:
+  take_profit_pct: null    # disables the take-profit order
+  max_holding_bars: null   # disables the time-based exit
+```
+
+When a numeric value is supplied, `take_profit_pct` and `max_holding_bars` must both be greater than zero. Positions that remain open at the end of the input data are closed with the `end_of_data` exit reason.
+
 `execution.mode: next_open` (default) takes the signal after a candle closes and submits a parent order that `backtesting.py` fills at the following open. The parent is created immediately with native contingent stop-loss and take-profit brackets, so the engine can evaluate them during the entry candle. Stop and target are planned from the signal close, **not** claimed to be exact percentages of the eventual fill. The trade export exposes the signal/fill prices, entry gap, planned and actual risk, explicit gap status, and whether entry and exit occurred in one bar. `signal_close` enables `trade_on_close=True`; it is experimental and potentially optimistic because a close-price fill may not be tradable in practice.
 
 `backtesting.py` evaluates parent/bracket execution from OHLC bars rather than tick data. When a gap crosses a planned level or multiple levels are reachable in one bar, the engine's native OHLC ordering and fill rules determine the result. Historical OHLCV, spread, fees, and stop/target execution cannot reproduce liquidity, slippage, corporate actions, or real-market execution.

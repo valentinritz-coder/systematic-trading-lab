@@ -29,7 +29,7 @@ class MomentumBreakoutStrategy(LongOnlyStrategy):
     breakout_lookback = 20
     sma_period = 50
     stop_loss_pct = 0.02
-    take_profit_pct = 0.04
+    take_profit_pct: float | None = 0.04
     max_holding_bars: int | None = None
     execution_mode = "next_open"
 
@@ -55,4 +55,5 @@ class MomentumBreakoutStrategy(LongOnlyStrategy):
                 }
             )
             # Native bracket orders are attached when the parent market order fills.
+            # A null target intentionally omits the take-profit contingent order.
             self.buy(sl=stop, tp=target, tag=tag)
