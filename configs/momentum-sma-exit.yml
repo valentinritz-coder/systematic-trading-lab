@@ -3,8 +3,8 @@ symbol: SPY
 data:
   provider: yahoo
   interval: 1d
-  start: 1993-01-29
-  end: 2026-07-20
+  start: 2010-01-01
+  end: 2026-01-01
   auto_adjust: false
 
 initial_cash: 1000
@@ -23,4 +23,4 @@ strategy:
   max_holding_bars: null
   exit_sma_period: 20
 
-output_dir: results
+output_dir: ../results
