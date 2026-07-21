@@ -2,25 +2,72 @@ name: Manual historical SPY backtest
 
 on:
   workflow_dispatch:
+    inputs:
+      variant:
+        description: Strategy variant
+        required: true
+        default: history
+        type: choice
+        options:
+          - history
+          - no-time-exit
+          - no-take-profit
+          - open-ended
 
 permissions:
   contents: read
 
 concurrency:
-  group: manual-historical-backtest
+  group: manual-historical-backtest-${{ inputs.variant }}
   cancel-in-progress: false
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --locked --all-extras
-      - run: uv run python -m trading_lab backtest --config configs/momentum-spy-history.yml
-      - uses: actions/upload-artifact@v4
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras
+
+      - name: Resolve configuration
+        id: config
+        shell: bash
+        run: |
+          case "${{ inputs.variant }}" in
+            history)
+              config="configs/momentum-spy-history.yml"
+              ;;
+            no-time-exit)
+              config="configs/momentum-spy-no-time-exit.yml"
+              ;;
+            no-take-profit)
+              config="configs/momentum-spy-no-take-profit.yml"
+              ;;
+            open-ended)
+              config="configs/momentum-spy-open-ended.yml"
+              ;;
+            *)
+              echo "Unknown variant: ${{ inputs.variant }}"
+              exit 1
+              ;;
+          esac
+
+          echo "path=$config" >> "$GITHUB_OUTPUT"
+          echo "Selected configuration: $config"
+
+      - name: Run historical backtest
+        run: |
+          uv run python -m trading_lab backtest \
+            --config "${{ steps.config.outputs.path }}"
+
+      - name: Upload backtest reports
+        uses: actions/upload-artifact@v4
         with:
-          name: historical-backtest-artifacts
+          name: historical-backtest-${{ inputs.variant }}-${{ github.run_number }}
           path: results/
           if-no-files-found: error
