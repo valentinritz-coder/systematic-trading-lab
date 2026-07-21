@@ -13,6 +13,7 @@ on:
           - no-time-exit
           - no-take-profit
           - open-ended
+          - sma-exit
 
 permissions:
   contents: read
@@ -51,6 +52,9 @@ jobs:
             open-ended)
               config="configs/momentum-spy-open-ended.yml"
               ;;
+            sma-exit)
+              config="configs/momentum-sma-exit.yml"
+              ;;           
             *)
               echo "Unknown variant: ${{ inputs.variant }}"
               exit 1
