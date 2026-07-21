@@ -4,6 +4,7 @@ data:
   provider: yahoo
   interval: 1d
   start: 2010-01-01
+  end: 2026-01-01
   auto_adjust: true
 initial_cash: 1000.0
 commission_fixed: 0.10
