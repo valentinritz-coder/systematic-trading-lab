@@ -1,0 +1,26 @@
+name: Manual historical SPY backtest
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manual-historical-backtest
+  cancel-in-progress: false
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked --all-extras
+      - run: uv run python -m trading_lab backtest --config configs/momentum-spy-history.yml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: historical-backtest-artifacts
+          path: results/
+          if-no-files-found: error

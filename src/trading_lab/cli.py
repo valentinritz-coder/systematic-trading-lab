@@ -24,10 +24,11 @@ def validate_config(
 @app.command("backtest")
 def backtest(
     config: Annotated[Path, typer.Option(..., exists=True, readable=True)],
+    data_snapshot: Annotated[Path | None, typer.Option(exists=True, readable=True)] = None,
 ) -> None:
     """Run a simulation only; this command cannot send real orders."""
     loaded = load_config(config)
-    stats, paths = run_backtest(loaded)
+    stats, paths = run_backtest(loaded, data_snapshot=data_snapshot)
     metrics = build_metrics(stats, loaded.initial_cash)
     typer.echo("Backtest completed (simulation only; no real orders are possible).")
     for name, value in metrics.items():
