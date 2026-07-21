@@ -1,0 +1,26 @@
+symbol: SPY
+
+data:
+  provider: yahoo
+  interval: 1d
+  start: 1993-01-29
+  end: 2026-07-20
+  auto_adjust: false
+
+initial_cash: 1000
+commission_fixed: 0.0
+commission_rate: 0.001
+spread: 0.0
+
+execution:
+  mode: next_open
+
+strategy:
+  breakout_lookback: 20
+  sma_period: 50
+  stop_loss_pct: 0.02
+  take_profit_pct: null
+  max_holding_bars: null
+  exit_sma_period: 20
+
+output_dir: results
