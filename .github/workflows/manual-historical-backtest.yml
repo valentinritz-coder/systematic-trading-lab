@@ -53,7 +53,7 @@ jobs:
               config="configs/momentum-spy-open-ended.yml"
               ;;
             sma-exit)
-              config="configs/momentum-sma-exit.yml"
+              config="configs/momentum-spy-sma-exit.yml"
               ;;           
             *)
               echo "Unknown variant: ${{ inputs.variant }}"
