@@ -1,0 +1,34 @@
+name: Exploratory Yahoo simulation
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub Actions cron is UTC: 23:17 Europe/Paris in standard time.
+    - cron: '17 22 * * 1-5'
+permissions:
+  contents: read
+concurrency:
+  group: exploratory-yahoo-backtest
+  cancel-in-progress: false
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked --all-extras
+      - name: Run exploratory simulation (never sends orders)
+        run: |
+          uv run python -m trading_lab backtest --config configs/momentum-yahoo.yml || {
+            echo "Yahoo Finance data is unavailable or invalid; exploratory simulation failed." >&2
+            exit 1
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exploratory-yahoo-reports
+          path: results/
+          if-no-files-found: warn

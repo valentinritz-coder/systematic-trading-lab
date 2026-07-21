@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "systematic-trading-lab"
+version = "0.1.0"
+description = "Reproducible, long-only systematic trading research lab"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "backtesting==0.6.5",
+  "numpy>=1.26,<3.0",
+  "pandas>=2.2,<3.0",
+  "pydantic>=2.7,<3.0",
+  "PyYAML>=6.0,<7.0",
+  "typer>=0.12,<1.0",
+  "yfinance>=0.2.40,<1.0",
+]
+
+[project.scripts]
+trading-lab = "trading_lab.cli:app"
+
+[project.optional-dependencies]
+dev = ["mypy>=1.10,<2.0", "pytest>=8.2,<9.0", "ruff>=0.5,<1.0", "pandas-stubs>=2.2", "types-PyYAML>=6.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+exclude = ["tests"]
+
+[[tool.mypy.overrides]]
+module = ["backtesting", "backtesting.*", "yfinance"]
+ignore_missing_imports = true
