@@ -35,6 +35,7 @@ class StrategyConfig(BaseModel):
     stop_loss_pct: float = Field(default=0.02, gt=0, lt=1)
     take_profit_pct: float | None = Field(default=0.04, gt=0, lt=1)
     max_holding_bars: int | None = Field(default=None, ge=1)
+    exit_sma_period: int | None = Field(default=None, ge=1)
 
 
 class BacktestConfig(BaseModel):

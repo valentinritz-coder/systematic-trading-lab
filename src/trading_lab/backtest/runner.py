@@ -135,6 +135,7 @@ def run_backtest(
         data,
         config.execution.mode,
         config.strategy.max_holding_bars,
+        config.strategy.exit_sma_period,
     )
     paths["snapshot"] = output_dir / "input_ohlcv.csv"
     paths["manifest"] = write_manifest(output_dir, config, data, run_id, data_snapshot)
@@ -144,5 +145,16 @@ def run_backtest(
     except (ImportError, OSError, RuntimeError, ValueError) as exc:
         (output_dir / "html_report_unavailable.txt").write_text(str(exc), encoding="utf-8")
     else:
+        metrics = json.loads(paths["metrics"].read_text(encoding="utf-8"))
+        report_section = (
+            "<section><h2>Trade analytics</h2><ul>"
+            f"<li>Average duration: {metrics['average_trade_duration_bars']} bars</li>"
+            f"<li>Best-trade contribution: {metrics['best_trade_contribution_pct']}%</li>"
+            f"<li>Average MFE / MAE: {metrics['average_mfe_pct']}% / "
+            f"{metrics['average_mae_pct']}%</li>"
+            "</ul></section>"
+        )
+        html = html_path.read_text(encoding="utf-8")
+        html_path.write_text(html.replace("</body>", f"{report_section}</body>"), encoding="utf-8")
         paths["html"] = html_path
     return stats, paths
