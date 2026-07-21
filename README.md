@@ -1,3 +1,11 @@
+## Project status
+
+This repository remains a deterministic research lab for traditional-market
+strategies and historical experiments.
+
+The crypto bankroll and round-up trading project is developed separately in:
+`roundup-crypto-lab`.
+
 # systematic-trading-lab
 
 A reproducible **research laboratory** for long-only systematic trading simulations. Version 0.1 cannot connect to a broker and cannot submit real orders. It is educational/experimental software, not investment advice; past performance does not guarantee future results.
