@@ -4,11 +4,17 @@ from abc import ABC, abstractmethod
 from datetime import date
 from typing import cast
 
+import numpy as np
 import pandas as pd
 
 REQUIRED_OHLCV_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
 OHLC_COLUMNS = ("Open", "High", "Low", "Close")
 MAX_DIAGNOSTIC_ROWS = 5
+# One IEEE-754 double-precision unit of relative rounding error.  This accepts
+# Yahoo's observed one-to-two-ULP disagreements between equivalent OHLC values
+# while preserving rejection of meaningful price inconsistencies.
+OHLC_FLOAT_RTOL = np.finfo(float).eps
+OHLC_FLOAT_ATOL = np.finfo(float).eps
 
 
 class DataValidationError(ValueError):
@@ -26,9 +32,19 @@ class DataProvider(ABC):
 
 
 def _invalid_ohlcv_rows(frame: pd.DataFrame, invalid: pd.Series) -> str:
-    """Render a bounded, copy-pasteable sample of rows that fail an OHLC invariant."""
+    """Render precise values and invariant deltas for a bounded invalid-row sample."""
     rows = frame.loc[invalid, list(OHLC_COLUMNS)].head(MAX_DIAGNOSTIC_ROWS)
-    return rows.reset_index(names="index").to_string(index=False)
+    maximums = rows[["Open", "Close", "Low"]].max(axis=1)
+    minimums = rows[["Open", "Close", "High"]].min(axis=1)
+    diagnostic = rows.assign(
+        **{
+            "High - max(Open, Close, Low)": rows["High"] - maximums,
+            "Low - min(Open, Close, High)": rows["Low"] - minimums,
+        }
+    ).reset_index(names="index")
+    return diagnostic.map(
+        lambda value: format(value, ".17g") if isinstance(value, float) else value
+    ).to_string(index=False)
 
 
 def validate_ohlcv(frame: pd.DataFrame, *, normalize_index: bool = False) -> pd.DataFrame:
@@ -60,14 +76,24 @@ def validate_ohlcv(frame: pd.DataFrame, *, normalize_index: bool = False) -> pd.
     close_prices = cast(pd.Series, result["Close"])
     maximums = pd.concat([open_prices, close_prices, low_prices], axis=1).max(axis=1)
     minimums = pd.concat([open_prices, close_prices, high_prices], axis=1).min(axis=1)
-    invalid_high = high_prices < maximums
+    invalid_high = (high_prices < maximums) & ~np.isclose(
+        high_prices,
+        maximums,
+        rtol=OHLC_FLOAT_RTOL,
+        atol=OHLC_FLOAT_ATOL,
+    )
     if invalid_high.any():
         raise DataValidationError(
             "High must be at least Open, Close, and Low. "
             f"First invalid rows (up to {MAX_DIAGNOSTIC_ROWS}):\n"
             f"{_invalid_ohlcv_rows(cast(pd.DataFrame, result), invalid_high)}"
         )
-    invalid_low = low_prices > minimums
+    invalid_low = (low_prices > minimums) & ~np.isclose(
+        low_prices,
+        minimums,
+        rtol=OHLC_FLOAT_RTOL,
+        atol=OHLC_FLOAT_ATOL,
+    )
     if invalid_low.any():
         raise DataValidationError(
             "Low must be at most Open, Close, and High. "
