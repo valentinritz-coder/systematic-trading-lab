@@ -1,0 +1,19 @@
+# SPY is an example Yahoo Finance symbol for exploratory data only, not investment advice.
+symbol: SPY
+data:
+  provider: yahoo
+  interval: 1d
+  start: 2020-01-01
+initial_cash: 1000.0
+commission_fixed: 0.10
+commission_rate: 0.001
+spread: 0.0005
+execution:
+  mode: next_open
+strategy:
+  breakout_lookback: 20
+  sma_period: 50
+  stop_loss_pct: 0.02
+  take_profit_pct: 0.04
+  max_holding_bars: 15
+output_dir: ../results
