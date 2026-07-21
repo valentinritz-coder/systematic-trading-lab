@@ -23,3 +23,15 @@ def test_unsorted_and_duplicate_data_are_normalized_explicitly() -> None:
     assert not normalized.index.has_duplicates
     with pytest.raises(DataValidationError, match="sorted"):
         validate_ohlcv(raw)
+
+
+def test_ohlcv_high_validation_reports_invalid_rows() -> None:
+    raw = frame()
+    raw.loc[raw.index[0], "High"] = 1
+
+    with pytest.raises(DataValidationError, match="First invalid rows") as error:
+        validate_ohlcv(raw)
+
+    message = str(error.value)
+    assert "2024-01-01" in message
+    assert "Open" in message and "High" in message and "Low" in message and "Close" in message

@@ -9,6 +9,7 @@ import pytest
 from trading_lab.backtest.reporting import enrich_trades
 from trading_lab.backtest.runner import run_backtest
 from trading_lab.config import load_config
+from trading_lab.data.base import DataValidationError
 from trading_lab.data.yahoo_provider import YahooFinanceDataProvider
 
 ROOT = Path(__file__).parents[1]
@@ -54,6 +55,29 @@ def test_yahoo_provider_forwards_auto_adjust(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=download))
     YahooFinanceDataProvider(auto_adjust=True).load("SPY", None, None, "1d")
     assert captured["auto_adjust"] is True
+
+
+def test_yahoo_provider_normalizes_ticker_first_multiindex_and_reports_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    columns = pd.MultiIndex.from_product(
+        [["SPY"], ["Open", "High", "Low", "Close", "Volume"]], names=["Ticker", "Price"]
+    )
+    frame = pd.DataFrame(
+        [[2, 1, 1, 1.5, 10]], columns=columns, index=pd.date_range("2024-01-01", periods=1)
+    )
+
+    monkeypatch.setitem(
+        sys.modules, "yfinance", SimpleNamespace(download=lambda *args, **kwargs: frame)
+    )
+
+    with pytest.raises(DataValidationError, match="columns_are_multiindex=True") as error:
+        YahooFinanceDataProvider(auto_adjust=True).load("SPY", None, None, "1d")
+
+    message = str(error.value)
+    assert "High must be at least" in message
+    assert "2024-01-01" in message
+    assert "dtypes=" in message
 
 
 def test_snapshot_replay_writes_artifacts_and_never_uses_yahoo(

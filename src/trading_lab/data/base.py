@@ -2,10 +2,13 @@
 
 from abc import ABC, abstractmethod
 from datetime import date
+from typing import cast
 
 import pandas as pd
 
 REQUIRED_OHLCV_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
+OHLC_COLUMNS = ("Open", "High", "Low", "Close")
+MAX_DIAGNOSTIC_ROWS = 5
 
 
 class DataValidationError(ValueError):
@@ -20,6 +23,12 @@ class DataProvider(ABC):
         self, symbol: str, start: date | None, end: date | None, interval: str
     ) -> pd.DataFrame:
         """Return validated OHLCV data without side effects."""
+
+
+def _invalid_ohlcv_rows(frame: pd.DataFrame, invalid: pd.Series) -> str:
+    """Render a bounded, copy-pasteable sample of rows that fail an OHLC invariant."""
+    rows = frame.loc[invalid, list(OHLC_COLUMNS)].head(MAX_DIAGNOSTIC_ROWS)
+    return rows.reset_index(names="index").to_string(index=False)
 
 
 def validate_ohlcv(frame: pd.DataFrame, *, normalize_index: bool = False) -> pd.DataFrame:
@@ -45,10 +54,24 @@ def validate_ohlcv(frame: pd.DataFrame, *, normalize_index: bool = False) -> pd.
         raise DataValidationError("OHLC prices must be positive")
     if (result["Volume"] < 0).any():
         raise DataValidationError("OHLCV volume cannot be negative")
-    maximums = pd.concat([result["Open"], result["Close"], result["Low"]], axis=1).max(axis=1)
-    minimums = pd.concat([result["Open"], result["Close"], result["High"]], axis=1).min(axis=1)
-    if (result["High"] < maximums).any():
-        raise DataValidationError("High must be at least Open, Close, and Low")
-    if (result["Low"] > minimums).any():
-        raise DataValidationError("Low must be at most Open, Close, and High")
+    open_prices = cast(pd.Series, result["Open"])
+    high_prices = cast(pd.Series, result["High"])
+    low_prices = cast(pd.Series, result["Low"])
+    close_prices = cast(pd.Series, result["Close"])
+    maximums = pd.concat([open_prices, close_prices, low_prices], axis=1).max(axis=1)
+    minimums = pd.concat([open_prices, close_prices, high_prices], axis=1).min(axis=1)
+    invalid_high = high_prices < maximums
+    if invalid_high.any():
+        raise DataValidationError(
+            "High must be at least Open, Close, and Low. "
+            f"First invalid rows (up to {MAX_DIAGNOSTIC_ROWS}):\n"
+            f"{_invalid_ohlcv_rows(cast(pd.DataFrame, result), invalid_high)}"
+        )
+    invalid_low = low_prices > minimums
+    if invalid_low.any():
+        raise DataValidationError(
+            "Low must be at most Open, Close, and High. "
+            f"First invalid rows (up to {MAX_DIAGNOSTIC_ROWS}):\n"
+            f"{_invalid_ohlcv_rows(cast(pd.DataFrame, result), invalid_low)}"
+        )
     return pd.DataFrame(result.astype(float))
