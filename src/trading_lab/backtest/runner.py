@@ -21,11 +21,13 @@ from trading_lab.data.yahoo_provider import YahooFinanceDataProvider
 from trading_lab.strategies.momentum_breakout import MomentumBreakoutStrategy
 
 
-def provider_for(config: BacktestConfig) -> DataProvider:
+def provider_for(config: BacktestConfig, snapshot: Path | None = None) -> DataProvider:
+    if snapshot is not None:
+        return CsvDataProvider(snapshot)
     if config.data.provider == "csv":
         assert config.data.path is not None
         return CsvDataProvider(config.data.path)
-    return YahooFinanceDataProvider()
+    return YahooFinanceDataProvider(auto_adjust=config.data.auto_adjust)
 
 
 def create_run_dir(config: BacktestConfig, run_id: str) -> Path:
@@ -35,9 +37,15 @@ def create_run_dir(config: BacktestConfig, run_id: str) -> Path:
 
 
 def git_commit() -> str | None:
+    import os
+
+    if sha := os.environ.get("GITHUB_SHA"):
+        return sha
     try:
         return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+            ["git", "-C", str(Path(__file__).resolve().parents[3]), "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
         ).strip()
     except (OSError, subprocess.CalledProcessError):
         return None
@@ -49,7 +57,11 @@ def data_fingerprint(data: pd.DataFrame) -> str:
 
 
 def write_manifest(
-    output_dir: Path, config: BacktestConfig, data: pd.DataFrame, run_id: str
+    output_dir: Path,
+    config: BacktestConfig,
+    data: pd.DataFrame,
+    run_id: str,
+    data_snapshot: Path | None = None,
 ) -> Path:
     manifest = {
         "timestamp_utc": datetime.now(UTC).isoformat(),
@@ -63,8 +75,17 @@ def write_manifest(
             "trading_lab": version("systematic-trading-lab"),
         },
         "resolved_config": config.model_dump(mode="json"),
-        "data_provider": config.data.provider,
+        "configured_data_provider": config.data.provider,
+        "effective_data_provider": "snapshot"
+        if data_snapshot is not None
+        else config.data.provider,
+        "snapshot_path": str(data_snapshot.resolve()) if data_snapshot is not None else None,
         "symbol": config.symbol,
+        "interval": config.data.interval,
+        "requested_start_date": str(config.data.start) if config.data.start else None,
+        "requested_end_date": str(config.data.end) if config.data.end else None,
+        "auto_adjust": config.data.auto_adjust,
+        "strategy_parameters": config.strategy.model_dump(),
         "first_data_timestamp": data.index[0].isoformat(),
         "last_data_timestamp": data.index[-1].isoformat(),
         "bar_count": len(data),
@@ -77,9 +98,11 @@ def write_manifest(
     return path
 
 
-def run_backtest(config: BacktestConfig) -> tuple[pd.Series, dict[str, Path]]:
+def run_backtest(
+    config: BacktestConfig, data_snapshot: Path | None = None
+) -> tuple[pd.Series, dict[str, Path]]:
     """Load data, execute a no-short/no-leverage backtest, and persist reports."""
-    data = provider_for(config).load(
+    data = provider_for(config, data_snapshot).load(
         config.symbol, config.data.start, config.data.end, config.data.interval
     )
 
@@ -88,6 +111,9 @@ def run_backtest(config: BacktestConfig) -> tuple[pd.Series, dict[str, Path]]:
 
     run_id = uuid4().hex[:8]
     output_dir = create_run_dir(config, run_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # A Yahoo run is always captured; CSV snapshots are also copied for reproducibility.
+    data.to_csv(output_dir / "input_ohlcv.csv", index=True, index_label="timestamp")
     engine = Backtest(
         data,
         MomentumBreakoutStrategy,
@@ -102,8 +128,9 @@ def run_backtest(config: BacktestConfig) -> tuple[pd.Series, dict[str, Path]]:
     stats = engine.run(**config.strategy.model_dump(), execution_mode=config.execution.mode)
     if (stats["_trades"]["Size"] < 0).any():
         raise RuntimeError("Backtest produced a short transaction; refusing to write reports")
-    paths = write_reports(stats, config.initial_cash, output_dir)
-    paths["manifest"] = write_manifest(output_dir, config, data, run_id)
+    paths = write_reports(stats, config.initial_cash, output_dir, data, config.execution.mode)
+    paths["snapshot"] = output_dir / "input_ohlcv.csv"
+    paths["manifest"] = write_manifest(output_dir, config, data, run_id, data_snapshot)
     html_path = output_dir / "report.html"
     try:
         engine.plot(filename=str(html_path), open_browser=False)

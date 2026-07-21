@@ -22,7 +22,9 @@ def _number(value: Any) -> float | int | None:
     return None
 
 
-def enrich_trades(trades: pd.DataFrame) -> pd.DataFrame:
+def enrich_trades(
+    trades: pd.DataFrame, data: pd.DataFrame | None = None, execution_mode: str = "next_open"
+) -> pd.DataFrame:
     """Add robust signal metadata and gap-aware risk fields to completed trades."""
     result = trades.copy()
     for column in _TAG_FIELDS:
@@ -46,12 +48,17 @@ def enrich_trades(trades: pd.DataFrame) -> pd.DataFrame:
         (result["signal_price"] - result["planned_stop_price"]) / result["signal_price"] * 100
     )
     result["gap_status"] = "within_brackets"
-    result.loc[result["actual_entry_price"] <= result["planned_stop_price"], "gap_status"] = (
-        "opened_below_stop"
-    )
-    result.loc[result["actual_entry_price"] >= result["planned_target_price"], "gap_status"] = (
-        "opened_above_target"
-    )
+    result.loc[~result["trade_metadata_valid"], "gap_status"] = "metadata_invalid"
+    result.loc[
+        result["trade_metadata_valid"]
+        & (result["actual_entry_price"] <= result["planned_stop_price"]),
+        "gap_status",
+    ] = "opened_below_stop"
+    result.loc[
+        result["trade_metadata_valid"]
+        & (result["actual_entry_price"] >= result["planned_target_price"]),
+        "gap_status",
+    ] = "opened_above_target"
     valid = result["gap_status"].eq("within_brackets") & result["trade_metadata_valid"]
     result["actual_risk_to_planned_stop_pct"] = np.nan
     result.loc[valid, "actual_risk_to_planned_stop_pct"] = (
@@ -62,6 +69,33 @@ def enrich_trades(trades: pd.DataFrame) -> pd.DataFrame:
     result["entry_and_exit_same_bar"] = result.get("EntryBar", pd.Series(dtype=int)).eq(
         result.get("ExitBar", pd.Series(dtype=int))
     )
+    result["entry_date"] = result.get("EntryTime", pd.Series(dtype="datetime64[ns]"))
+    result["exit_date"] = result.get("ExitTime", pd.Series(dtype="datetime64[ns]"))
+    result["signal_date"] = pd.NaT
+    if data is not None:
+        for index, trade in result.iterrows():
+            entry_bar = int(trade["EntryBar"])
+            signal_bar = entry_bar if execution_mode == "signal_close" else entry_bar - 1
+            if 0 <= signal_bar < len(data):
+                result.loc[index, "signal_date"] = data.index[signal_bar]
+    result["exit_price"] = result.get("ExitPrice", pd.Series(dtype=float))
+    result["return_pct"] = result.get("ReturnPct", pd.Series(dtype=float)) * 100
+    result["pnl"] = result.get("PnL", pd.Series(dtype=float))
+    result["holding_bars"] = result.get("ExitBar", pd.Series(dtype=float)) - result.get(
+        "EntryBar", pd.Series(dtype=float)
+    )
+    result["exit_reason"] = "unknown"
+    tolerance = 1e-8
+    result.loc[
+        (result["exit_price"] - result["planned_stop_price"]).abs() < tolerance, "exit_reason"
+    ] = "stop_loss"
+    result.loc[
+        (result["exit_price"] - result["planned_target_price"]).abs() < tolerance, "exit_reason"
+    ] = "take_profit"
+    # The engine does not expose a reason. This only identifies the deterministic holding exit.
+    result.loc[
+        (result["exit_reason"] == "unknown") & (result["holding_bars"] >= 0), "exit_reason"
+    ] = "unknown"
     return result
 
 
@@ -101,7 +135,22 @@ def build_metrics(stats: pd.Series, initial_cash: float) -> dict[str, MetricValu
     }
 
 
-def write_reports(stats: pd.Series, initial_cash: float, output_dir: Path) -> dict[str, Path]:
+def longest_loss_streak(trades: pd.DataFrame) -> int:
+    """Return the longest consecutive sequence of losing completed trades."""
+    longest = current = 0
+    for pnl_value in trades.get("PnL", pd.Series(dtype=float)):
+        current = current + 1 if pnl_value < 0 else 0
+        longest = max(longest, current)
+    return longest
+
+
+def write_reports(
+    stats: pd.Series,
+    initial_cash: float,
+    output_dir: Path,
+    data: pd.DataFrame | None = None,
+    execution_mode: str = "next_open",
+) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics = build_metrics(stats, initial_cash)
     metrics["generated_at"] = datetime.now(UTC).isoformat()
@@ -111,6 +160,96 @@ def write_reports(stats: pd.Series, initial_cash: float, output_dir: Path) -> di
         output_dir / "equity_curve.csv",
     )
     metrics_path.write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
-    enrich_trades(stats["_trades"]).to_csv(trades_path, index=False)
-    stats["_equity_curve"].to_csv(equity_path, index=True, index_label="timestamp")
-    return {"metrics": metrics_path, "trades": trades_path, "equity": equity_path}
+    trades = enrich_trades(stats["_trades"], data, execution_mode)
+    trades.to_csv(trades_path, index=False)
+    equity = stats["_equity_curve"].copy()
+    equity.to_csv(equity_path, index=True, index_label="timestamp")
+    returns = equity["Equity"].pct_change().fillna(0)
+    monthly = (1 + returns).resample("ME").prod().sub(1).mul(100).rename("return_pct")
+    yearly = (1 + returns).resample("YE").prod().sub(1).mul(100).rename("return_pct")
+    drawdown = (
+        equity["Equity"].div(equity["Equity"].cummax()).sub(1).mul(100).rename("drawdown_pct")
+    )
+    monthly.to_csv(output_dir / "monthly_returns.csv", index_label="period")
+    yearly.to_csv(output_dir / "yearly_returns.csv", index_label="year")
+    drawdown.to_csv(output_dir / "drawdown.csv", index_label="timestamp")
+    years = (
+        pd.to_datetime(trades["entry_date"]).dt.year if not trades.empty else pd.Series(dtype=int)
+    )
+    years.value_counts().sort_index().rename_axis("year").rename("trade_count").to_csv(
+        output_dir / "trades_by_year.csv"
+    )
+    reasons = trades["exit_reason"].value_counts().to_dict() if not trades.empty else {}
+    years_count = max((equity.index[-1] - equity.index[0]).days / 365.25, 1 / 365.25)
+    final_capital = float(stats["Equity Final [$]"])
+    buy_hold_return_pct = float(metrics["buy_and_hold_return_pct"] or 0)
+    strategy_annualized = (final_capital / initial_cash) ** (1 / years_count) - 1
+    buy_hold_final = initial_cash * (1 + buy_hold_return_pct / 100)
+    buy_hold_annualized = (buy_hold_final / initial_cash) ** (1 / years_count) - 1
+    buy_hold_returns = data["Close"].pct_change().fillna(0) if data is not None else returns
+    buy_hold_equity = initial_cash * (1 + buy_hold_returns).cumprod()
+    buy_hold_drawdown = buy_hold_equity.div(buy_hold_equity.cummax()).sub(1).mul(100)
+    buy_hold_max_drawdown = float(buy_hold_drawdown.min())
+    time_in_market = float(trades["holding_bars"].sum() / len(equity) * 100) if len(equity) else 0
+    average_holding = trades["holding_bars"].mean() if not trades.empty else 0
+    total_return = metrics["total_return_pct"]
+    buy_hold_return = metrics["buy_and_hold_return_pct"]
+    strategy_volatility = returns.std() * (252**0.5) * 100
+    buy_hold_volatility = buy_hold_returns.std() * (252**0.5) * 100
+    strategy_annualized_pct = strategy_annualized * 100
+    buy_hold_annualized_pct = buy_hold_annualized * 100
+    annualized_row = (
+        f"| Annualized return | {strategy_annualized_pct:.2f}% | {buy_hold_annualized_pct:.2f}% |"
+    )
+    summary = "\n".join(
+        [
+            "# Backtest summary",
+            "",
+            f"Period: {equity.index[0].date()} to {equity.index[-1].date()}",
+            f"Initial capital: {initial_cash:.2f}",
+            f"Final capital: {metrics['final_capital']:.2f}",
+            f"Strategy return: {metrics['total_return_pct']}%",
+            f"Buy-and-hold return: {metrics['buy_and_hold_return_pct']}%",
+            "",
+            "## Trades",
+            f"Trades: {metrics['trade_count']} | Win rate: {metrics['win_rate_pct']}%",
+            f"Average gain: {metrics['average_gain']} | Average loss: {metrics['average_loss']}",
+            f"Profit factor: {metrics['profit_factor']} | Expectancy: {metrics['expectancy']}",
+            f"Longest loss streak: {longest_loss_streak(trades)}",
+            f"Average holding bars: {average_holding}",
+            "",
+            f"Max drawdown: {metrics['max_drawdown_pct']}%",
+            f"Average entry gap: {metrics['average_entry_gap_pct']}%",
+            f"Estimated commissions: {metrics['estimated_commissions']}",
+            f"Best trade: {metrics['best_trade']} | Worst trade: {metrics['worst_trade']}",
+            f"Exit reasons: {reasons}",
+            "",
+            "## Same-data comparison",
+            "| Metric | Strategy | Buy-and-hold |",
+            "| --- | ---: | ---: |",
+            f"| Total return | {total_return}% | {buy_hold_return}% |",
+            annualized_row,
+            f"| Annualized volatility | {strategy_volatility:.2f}% | {buy_hold_volatility:.2f}% |",
+            f"| Max drawdown | {metrics['max_drawdown_pct']}% | {buy_hold_max_drawdown:.2f}% |",
+            f"| Time in position | {time_in_market:.2f}% | 100.00% |",
+            f"| Transactions | {metrics['trade_count']} | 1 |",
+            f"| Final capital | {metrics['final_capital']:.2f} | {buy_hold_final:.2f} |",
+            "",
+            "Buy-and-hold uses the same OHLCV data but is not risk-equivalent: "
+            "this strategy can remain in cash.",
+            "Exit reasons are inferred only when a price exactly matches a planned bracket; "
+            "otherwise they remain `unknown`.",
+        ]
+    )
+    summary_path = output_dir / "summary.md"
+    summary_path.write_text(summary, encoding="utf-8")
+    return {
+        "metrics": metrics_path,
+        "trades": trades_path,
+        "equity": equity_path,
+        "summary": summary_path,
+        "monthly_returns": output_dir / "monthly_returns.csv",
+        "yearly_returns": output_dir / "yearly_returns.csv",
+        "drawdown": output_dir / "drawdown.csv",
+        "trades_by_year": output_dir / "trades_by_year.csv",
+    }

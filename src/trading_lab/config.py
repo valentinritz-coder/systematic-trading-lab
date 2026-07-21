@@ -14,6 +14,7 @@ class DataConfig(BaseModel):
     interval: str = "1d"
     start: date | None = None
     end: date | None = None
+    auto_adjust: bool = False
 
     @model_validator(mode="after")
     def validate_source(self) -> "DataConfig":
